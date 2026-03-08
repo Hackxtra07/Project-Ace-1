@@ -1,58 +1,33 @@
 import os
-import sqlite3
+from pymongo import MongoClient
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkcalendar import DateEntry
 from datetime import datetime
 
 # ---------------- Database Setup ----------------
-conn = sqlite3.connect("project_management.db")
-cursor = conn.cursor()
+# MongoDB Atlas Connection
+uri = "mongodb+srv://manankamboj66_db_user:HeZJf1a7BKEQq3IF@globaldb.jmzxyvp.mongodb.net/?appName=GlobalDB"
+try:
+    client = MongoClient(uri)
+    db = client["GlobalDB"]
+    
+    projects_col = db["Projects"]
+    members_col = db["TeamMembers"]
+    tasks_col = db["Tasks"]
+    targets_col = db["Targets"]
+    counters_col = db["Counters"]
+except Exception as e:
+    print(f"Error connecting to MongoDB: {e}")
 
-# Create tables
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS Projects (
-    project_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    start_date TEXT NOT NULL,
-    end_date TEXT,
-    priority TEXT,
-    signed TEXT DEFAULT 'No'
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS TeamMembers (
-    member_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    role TEXT
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS Tasks (
-    task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER,
-    name TEXT NOT NULL,
-    assigned_to INTEGER,
-    status TEXT DEFAULT 'Pending',
-    due_date TEXT,
-    comments TEXT,
-    signed TEXT DEFAULT 'No',
-    FOREIGN KEY (project_id) REFERENCES Projects(project_id) ON DELETE CASCADE,
-    FOREIGN KEY (assigned_to) REFERENCES TeamMembers(member_id) ON DELETE SET NULL
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS Targets (
-    target_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER,
-    name TEXT NOT NULL,
-    due_date TEXT,
-    status TEXT DEFAULT 'Pending',
-    description TEXT,
-    FOREIGN KEY (project_id) REFERENCES Projects(project_id) ON DELETE CASCADE
-)
-""")
-conn.commit()
+def get_next_sequence(name):
+    ret = counters_col.find_one_and_update(
+        {"_id": name},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True
+    )
+    return ret["seq"]
 
 # ---------------- Helper Functions ----------------
 def show_message(msg):
@@ -111,29 +86,42 @@ def add_project():
     if not name or not start:
         show_message("Name and Start Date required!")
         return
-    cursor.execute("INSERT INTO Projects (name,start_date,end_date,priority) VALUES (?,?,?,?)",
-                   (name,start,end,priority))
-    conn.commit()
+    
+    project_id = get_next_sequence("project_id")
+    projects_col.insert_one({
+        "project_id": project_id,
+        "name": name,
+        "start_date": start,
+        "end_date": end,
+        "priority": priority,
+        "signed": "No"
+    })
+    
     clear_project_fields()
     load_projects()
     update_dashboard()
+    update_dropdowns()
 
 def update_project():
     selected = project_tree.selection()
     if not selected:
         show_message("Select a project to update!")
         return
-    project_id = project_tree.item(selected[0])['values'][0]
+    project_id = int(project_tree.item(selected[0])['values'][0])
     name = project_name_var.get()
     start = project_start_var.get()
     end = project_end_var.get()
     priority = project_priority_var.get()
-    cursor.execute("UPDATE Projects SET name=?, start_date=?, end_date=?, priority=? WHERE project_id=?",
-                   (name,start,end,priority,project_id))
-    conn.commit()
+    
+    projects_col.update_one(
+        {"project_id": project_id},
+        {"$set": {"name": name, "start_date": start, "end_date": end, "priority": priority}}
+    )
+    
     clear_project_fields()
     load_projects()
     update_dashboard()
+    update_dropdowns()
 
 def delete_project():
     selected = project_tree.selection()
@@ -141,13 +129,17 @@ def delete_project():
         show_message("Select a project to delete!")
         return
     for sel in selected:
-        project_id = project_tree.item(sel)['values'][0]
-        cursor.execute("DELETE FROM Projects WHERE project_id=?",(project_id,))
-    conn.commit()
+        project_id = int(project_tree.item(sel)['values'][0])
+        projects_col.delete_one({"project_id": project_id})
+        # Cascade delete (mimic SQLite CASCADE)
+        tasks_col.delete_many({"project_id": project_id})
+        targets_col.delete_many({"project_id": project_id})
+        
     load_projects()
     load_tasks()
     load_targets()
     update_dashboard()
+    update_dropdowns()
 
 def clear_project_fields():
     project_name_var.set("")
@@ -158,9 +150,12 @@ def clear_project_fields():
 def load_projects():
     for row in project_tree.get_children():
         project_tree.delete(row)
-    cursor.execute("SELECT * FROM Projects")
-    for proj in cursor.fetchall():
-        project_tree.insert("", "end", values=proj, tags=(proj[4],))
+    
+    projects = projects_col.find().sort("project_id", 1)
+    for proj in projects:
+        val = (proj["project_id"], proj["name"], proj["start_date"], proj["end_date"], proj["priority"], proj.get("signed", "No"))
+        project_tree.insert("", "end", values=val, tags=(proj["priority"],))
+    
     project_tree.tag_configure("High", background="#f28b82")
     project_tree.tag_configure("Medium", background="#fff475")
     project_tree.tag_configure("Low", background="#ccff90")
@@ -181,23 +176,35 @@ def add_member():
     if not name:
         show_message("Name required!")
         return
-    cursor.execute("INSERT INTO TeamMembers (name, role) VALUES (?,?)",(name,role))
-    conn.commit()
+    
+    member_id = get_next_sequence("member_id")
+    members_col.insert_one({
+        "member_id": member_id,
+        "name": name,
+        "role": role
+    })
+    
     clear_member_fields()
     load_members()
+    update_dropdowns()
 
 def update_member():
     selected = member_tree.selection()
     if not selected:
         show_message("Select a member to update!")
         return
-    member_id = member_tree.item(selected[0])['values'][0]
+    member_id = int(member_tree.item(selected[0])['values'][0])
     name = member_name_var.get()
     role = member_role_var.get()
-    cursor.execute("UPDATE TeamMembers SET name=?, role=? WHERE member_id=?",(name,role,member_id))
-    conn.commit()
+    
+    members_col.update_one(
+        {"member_id": member_id},
+        {"$set": {"name": name, "role": role}}
+    )
+    
     clear_member_fields()
     load_members()
+    update_dropdowns()
 
 def delete_member():
     selected = member_tree.selection()
@@ -205,12 +212,14 @@ def delete_member():
         show_message("Select a member to delete!")
         return
     for sel in selected:
-        member_id = member_tree.item(sel)['values'][0]
-        cursor.execute("DELETE FROM TeamMembers WHERE member_id=?",(member_id,))
-        cursor.execute("UPDATE Tasks SET assigned_to=NULL WHERE assigned_to=?",(member_id,))
-    conn.commit()
+        member_id = int(member_tree.item(sel)['values'][0])
+        members_col.delete_one({"member_id": member_id})
+        # Set assigned_to to None in Tasks
+        tasks_col.update_many({"assigned_to": member_id}, {"$set": {"assigned_to": None}})
+        
     load_members()
     load_tasks()
+    update_dropdowns()
 
 def clear_member_fields():
     member_name_var.set("")
@@ -219,9 +228,11 @@ def clear_member_fields():
 def load_members():
     for row in member_tree.get_children():
         member_tree.delete(row)
-    cursor.execute("SELECT * FROM TeamMembers")
-    for mem in cursor.fetchall():
-        member_tree.insert("", "end", values=mem)
+    
+    members = members_col.find().sort("member_id", 1)
+    for mem in members:
+        val = (mem["member_id"], mem["name"], mem["role"])
+        member_tree.insert("", "end", values=val)
 
 def select_member(event):
     selected = member_tree.selection()
@@ -233,18 +244,35 @@ def select_member(event):
 # ---------------- TASK FUNCTIONS ----------------
 def add_task():
     name = task_name_var.get()
-    project_id = task_project_var.get()
-    assigned_to = task_member_var.get()
+    project_str = task_project_var.get()
+    member_str = task_member_var.get()
     due = task_due_var.get()
     status = task_status_var.get()
     comments = task_comments_var.get()
-    if not name or not project_id:
-        show_message("Task Name and Project ID required!")
+    
+    if not name or not project_str:
+        show_message("Task Name and Project required!")
         return
-    cursor.execute("""INSERT INTO Tasks (name,project_id,assigned_to,due_date,status,comments)
-                      VALUES (?,?,?,?,?,?)""",
-                   (name,project_id,assigned_to if assigned_to else None,due,status,comments))
-    conn.commit()
+    
+    try:
+        project_id = int(project_str.split(" - ")[0])
+        assigned_to = int(member_str.split(" - ")[0]) if member_str else None
+    except:
+        show_message("Invalid Project or Member selection!")
+        return
+
+    task_id = get_next_sequence("task_id")
+    tasks_col.insert_one({
+        "task_id": task_id,
+        "name": name,
+        "project_id": project_id,
+        "assigned_to": assigned_to,
+        "due_date": due,
+        "status": status,
+        "comments": comments,
+        "signed": "No"
+    })
+    
     clear_task_fields()
     load_tasks()
     update_dashboard()
@@ -254,17 +282,33 @@ def update_task():
     if not selected:
         show_message("Select a task to update!")
         return
-    task_id = task_tree.item(selected[0])['values'][0]
+    task_id = int(task_tree.item(selected[0])['values'][0])
     name = task_name_var.get()
-    project_id = task_project_var.get()
-    assigned_to = task_member_var.get()
+    project_str = task_project_var.get()
+    member_str = task_member_var.get()
     due = task_due_var.get()
     status = task_status_var.get()
     comments = task_comments_var.get()
-    cursor.execute("""UPDATE Tasks SET name=?,project_id=?,assigned_to=?,due_date=?,status=?,comments=? 
-                      WHERE task_id=?""",
-                   (name,project_id,assigned_to if assigned_to else None,due,status,comments,task_id))
-    conn.commit()
+    
+    try:
+        project_id = int(project_str.split(" - ")[0])
+        assigned_to = int(member_str.split(" - ")[0]) if member_str else None
+    except:
+        show_message("Invalid Project or Member selection!")
+        return
+    
+    tasks_col.update_one(
+        {"task_id": task_id},
+        {"$set": {
+            "name": name,
+            "project_id": project_id,
+            "assigned_to": assigned_to,
+            "due_date": due,
+            "status": status,
+            "comments": comments
+        }}
+    )
+    
     clear_task_fields()
     load_tasks()
     update_dashboard()
@@ -275,9 +319,9 @@ def delete_task():
         show_message("Select a task to delete!")
         return
     for sel in selected:
-        task_id = task_tree.item(sel)['values'][0]
-        cursor.execute("DELETE FROM Tasks WHERE task_id=?",(task_id,))
-    conn.commit()
+        task_id = int(task_tree.item(sel)['values'][0])
+        tasks_col.delete_one({"task_id": task_id})
+        
     load_tasks()
     update_dashboard()
 
@@ -292,9 +336,12 @@ def clear_task_fields():
 def load_tasks():
     for row in task_tree.get_children():
         task_tree.delete(row)
-    cursor.execute("SELECT task_id,name,project_id,assigned_to,status,due_date,comments FROM Tasks")
-    for task in cursor.fetchall():
-        task_tree.insert("", "end", values=task)
+    
+    tasks = tasks_col.find().sort("task_id", 1)
+    for task in tasks:
+        val = (task["task_id"], task["name"], task["project_id"], task["assigned_to"], task["status"], task["due_date"], task["comments"])
+        task_tree.insert("", "end", values=val, tags=(task["status"],))
+    
     task_tree.tag_configure("Pending", background="#fff475")
     task_tree.tag_configure("In Progress", background="#aecbfa")
     task_tree.tag_configure("Completed", background="#ccff90")
@@ -304,25 +351,48 @@ def select_task(event):
     if selected:
         values = task_tree.item(selected[0])['values']
         task_name_var.set(values[1])
-        task_project_var.set(values[2])
-        task_member_var.set(values[3] if values[3] else "")
+        # Find project and member strings
+        p = projects_col.find_one({"project_id": int(values[2])})
+        task_project_var.set(f"{p['project_id']} - {p['name']}" if p else str(values[2]))
+        
+        if values[3] and str(values[3]) != "None" and str(values[3]) != "":
+            m = members_col.find_one({"member_id": int(values[3])})
+            task_member_var.set(f"{m['member_id']} - {m['name']}" if m else str(values[3]))
+        else:
+            task_member_var.set("")
+            
         task_status_var.set(values[4])
-        task_due_var.set(values[5] if values[5] else "")
-        task_comments_var.set(values[6] if values[6] else "")
+        task_due_var.set(values[5] if values[5] and str(values[5]) != "None" else "")
+        task_comments_var.set(values[6] if values[6] and str(values[6]) != "None" else "")
 
 # ---------------- TARGET FUNCTIONS ----------------
 def add_target():
     name = target_name_var.get()
-    project_id = target_project_var.get()
+    project_str = target_project_var.get()
     due = target_due_var.get()
     status = target_status_var.get()
     desc = target_desc_var.get()
-    if not name or not project_id:
-        show_message("Target Name and Project ID required!")
+    
+    if not name or not project_str:
+        show_message("Target Name and Project required!")
         return
-    cursor.execute("INSERT INTO Targets (name,project_id,due_date,status,description) VALUES (?,?,?,?,?)",
-                   (name,project_id,due,status,desc))
-    conn.commit()
+    
+    try:
+        project_id = int(project_str.split(" - ")[0])
+    except:
+        show_message("Invalid Project selection!")
+        return
+        
+    target_id = get_next_sequence("target_id")
+    targets_col.insert_one({
+        "target_id": target_id,
+        "name": name,
+        "project_id": project_id,
+        "due_date": due,
+        "status": status,
+        "description": desc
+    })
+    
     clear_target_fields()
     load_targets()
     update_dashboard()
@@ -332,15 +402,30 @@ def update_target():
     if not selected:
         show_message("Select a target to update!")
         return
-    target_id = target_tree.item(selected[0])['values'][0]
+    target_id = int(target_tree.item(selected[0])['values'][0])
     name = target_name_var.get()
-    project_id = target_project_var.get()
+    project_str = target_project_var.get()
     due = target_due_var.get()
     status = target_status_var.get()
     desc = target_desc_var.get()
-    cursor.execute("UPDATE Targets SET name=?,project_id=?,due_date=?,status=?,description=? WHERE target_id=?",
-                   (name,project_id,due,status,desc,target_id))
-    conn.commit()
+    
+    try:
+        project_id = int(project_str.split(" - ")[0])
+    except:
+        show_message("Invalid Project selection!")
+        return
+        
+    targets_col.update_one(
+        {"target_id": target_id},
+        {"$set": {
+            "name": name,
+            "project_id": project_id,
+            "due_date": due,
+            "status": status,
+            "description": desc
+        }}
+    )
+    
     clear_target_fields()
     load_targets()
     update_dashboard()
@@ -351,9 +436,9 @@ def delete_target():
         show_message("Select a target to delete!")
         return
     for sel in selected:
-        tid = target_tree.item(sel)['values'][0]
-        cursor.execute("DELETE FROM Targets WHERE target_id=?",(tid,))
-    conn.commit()
+        tid = int(target_tree.item(sel)['values'][0])
+        targets_col.delete_one({"target_id": tid})
+        
     load_targets()
     update_dashboard()
 
@@ -367,9 +452,12 @@ def clear_target_fields():
 def load_targets():
     for row in target_tree.get_children():
         target_tree.delete(row)
-    cursor.execute("SELECT target_id,name,project_id,due_date,status,description FROM Targets")
-    for t in cursor.fetchall():
-        target_tree.insert("", "end", values=t)
+        
+    targets = targets_col.find().sort("target_id", 1)
+    for t in targets:
+        val = (t["target_id"], t["name"], t["project_id"], t["due_date"], t["status"], t["description"])
+        target_tree.insert("", "end", values=val, tags=(t["status"],))
+        
     target_tree.tag_configure("Pending", background="#fff475")
     target_tree.tag_configure("Completed", background="#ccff90")
 
@@ -378,33 +466,40 @@ def select_target(event):
     if selected:
         values = target_tree.item(selected[0])['values']
         target_name_var.set(values[1])
-        target_project_var.set(values[2])
-        target_due_var.set(values[3])
+        p = projects_col.find_one({"project_id": int(values[2])})
+        target_project_var.set(f"{p['project_id']} - {p['name']}" if p else str(values[2]))
+        target_due_var.set(values[3] if values[3] and str(values[3]) != "None" else "")
         target_status_var.set(values[4])
-        target_desc_var.set(values[5])
+        target_desc_var.set(values[5] if values[5] and str(values[5]) != "None" else "")
 
 # ---------------- DASHBOARD ----------------
 def update_dashboard():
     for widget in dashboard_tab.winfo_children():
         widget.destroy()
-    cursor.execute("SELECT project_id,name FROM Projects")
-    projects = cursor.fetchall()
+        
+    projects = list(projects_col.find().sort("project_id", 1))
     row=0
     for p in projects:
-        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE project_id=?",(p[0],))
-        total_tasks = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE project_id=? AND status='Completed'",(p[0],))
-        completed_tasks = cursor.fetchone()[0]
+        pid = p["project_id"]
+        total_tasks = tasks_col.count_documents({"project_id": pid})
+        completed_tasks = tasks_col.count_documents({"project_id": pid, "status": "Completed"})
         progress = int((completed_tasks/total_tasks)*100) if total_tasks else 0
 
         # Project Card
         card = tk.Frame(dashboard_tab, bg="#ffffff", bd=2, relief="groove")
         card.grid(row=row, column=0, padx=10, pady=5, sticky="ew")
-        tk.Label(card, text=f"🌸 {p[1]}", font=("Helvetica",14,"bold"), bg="#ffffff").pack(anchor='w', padx=10, pady=5)
+        tk.Label(card, text=f"🌸 {p['name']}", font=("Helvetica",14,"bold"), bg="#ffffff").pack(anchor='w', padx=10, pady=5)
         tk.Label(card, text=f"Progress: {progress}%", font=("Helvetica",12), bg="#ffffff").pack(anchor='w', padx=10)
         pb = ttk.Progressbar(card,length=500,maximum=100,value=progress)
         pb.pack(padx=10, pady=5)
         row+=1
+
+def update_dropdowns():
+    p_list = [f"{p['project_id']} - {p['name']}" for p in projects_col.find().sort("project_id", 1)]
+    m_list = [f"{m['member_id']} - {m['name']}" for m in members_col.find().sort("member_id", 1)]
+    task_project_dd['values'] = p_list
+    task_member_dd['values'] = m_list
+    target_project_dd['values'] = p_list
 
 # ---------------- GUI ELEMENTS ----------------
 
@@ -454,12 +549,10 @@ task_frame.pack(side='top', fill='x', padx=10, pady=10)
 tk.Label(task_frame,text="Name", bg="#f0f4f7").grid(row=0,column=0)
 tk.Entry(task_frame,textvariable=task_name_var).grid(row=0,column=1)
 tk.Label(task_frame,text="Project", bg="#f0f4f7").grid(row=0,column=2)
-projects_list = [str(p[0])+" - "+p[1] for p in cursor.execute("SELECT project_id,name FROM Projects")]
-task_project_dd = ttk.Combobox(task_frame,textvariable=task_project_var,values=projects_list)
+task_project_dd = ttk.Combobox(task_frame,textvariable=task_project_var)
 task_project_dd.grid(row=0,column=3)
 tk.Label(task_frame,text="Assign To", bg="#f0f4f7").grid(row=0,column=4)
-members_list = [str(m[0])+" - "+m[1] for m in cursor.execute("SELECT member_id,name FROM TeamMembers")]
-task_member_dd = ttk.Combobox(task_frame,textvariable=task_member_var,values=members_list)
+task_member_dd = ttk.Combobox(task_frame,textvariable=task_member_var)
 task_member_dd.grid(row=0,column=5)
 tk.Label(task_frame,text="Status", bg="#f0f4f7").grid(row=0,column=6)
 ttk.Combobox(task_frame,textvariable=task_status_var,values=["Pending","In Progress","Completed"]).grid(row=0,column=7)
@@ -484,7 +577,7 @@ target_frame.pack(side='top', fill='x', padx=10, pady=10)
 tk.Label(target_frame,text="Name", bg="#f0f4f7").grid(row=0,column=0)
 tk.Entry(target_frame,textvariable=target_name_var).grid(row=0,column=1)
 tk.Label(target_frame,text="Project", bg="#f0f4f7").grid(row=0,column=2)
-target_project_dd = ttk.Combobox(target_frame,textvariable=target_project_var,values=projects_list)
+target_project_dd = ttk.Combobox(target_frame,textvariable=target_project_var)
 target_project_dd.grid(row=0,column=3)
 tk.Label(target_frame,text="Status", bg="#f0f4f7").grid(row=0,column=4)
 ttk.Combobox(target_frame,textvariable=target_status_var,values=["Pending","Completed"]).grid(row=0,column=5)
@@ -503,7 +596,8 @@ target_tree.pack(fill='both',expand=True,padx=10,pady=10)
 target_tree.bind("<<TreeviewSelect>>",select_target)
 load_targets()
 
-# ---------------- Initialize Dashboard ----------------
+# ---------------- Initialize ----------------
+update_dropdowns()
 update_dashboard()
 
 root.mainloop()
