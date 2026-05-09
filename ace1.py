@@ -5,29 +5,13 @@ from tkinter import ttk, messagebox, filedialog
 from tkcalendar import DateEntry
 from datetime import datetime
 
-# ---------------- Database Setup ----------------
-# MongoDB Atlas Connection
+# Hybrid Database Setup
+from hybrid_db import HybridDB
 uri = "mongodb+srv://manankamboj66_db_user:HeZJf1a7BKEQq3IF@globaldb.jmzxyvp.mongodb.net/?appName=GlobalDB"
-try:
-    client = MongoClient(uri)
-    db = client["GlobalDB"]
-    
-    projects_col = db["Projects"]
-    members_col = db["TeamMembers"]
-    tasks_col = db["Tasks"]
-    targets_col = db["Targets"]
-    counters_col = db["Counters"]
-except Exception as e:
-    print(f"Error connecting to MongoDB: {e}")
+hdb = HybridDB(uri, "GlobalDB")
 
 def get_next_sequence(name):
-    ret = counters_col.find_one_and_update(
-        {"_id": name},
-        {"$inc": {"seq": 1}},
-        upsert=True,
-        return_document=True
-    )
-    return ret["seq"]
+    return hdb.get_next_sequence(name)
 
 # ---------------- Helper Functions ----------------
 def show_message(msg):
@@ -88,7 +72,7 @@ def add_project():
         return
     
     project_id = get_next_sequence("project_id")
-    projects_col.insert_one({
+    hdb.insert_one("Projects", {
         "project_id": project_id,
         "name": name,
         "start_date": start,
@@ -113,7 +97,8 @@ def update_project():
     end = project_end_var.get()
     priority = project_priority_var.get()
     
-    projects_col.update_one(
+    hdb.update_one(
+        "Projects",
         {"project_id": project_id},
         {"$set": {"name": name, "start_date": start, "end_date": end, "priority": priority}}
     )
@@ -130,10 +115,10 @@ def delete_project():
         return
     for sel in selected:
         project_id = int(project_tree.item(sel)['values'][0])
-        projects_col.delete_one({"project_id": project_id})
-        # Cascade delete (mimic SQLite CASCADE)
-        tasks_col.delete_many({"project_id": project_id})
-        targets_col.delete_many({"project_id": project_id})
+        hdb.delete_one("Projects", {"project_id": project_id})
+        # Cascade delete
+        hdb.delete_many("Tasks", {"project_id": project_id})
+        hdb.delete_many("Targets", {"project_id": project_id})
         
     load_projects()
     load_tasks()
@@ -151,7 +136,7 @@ def load_projects():
     for row in project_tree.get_children():
         project_tree.delete(row)
     
-    projects = projects_col.find().sort("project_id", 1)
+    projects = hdb.find("Projects", sort_by="project_id")
     for proj in projects:
         val = (proj["project_id"], proj["name"], proj["start_date"], proj["end_date"], proj["priority"], proj.get("signed", "No"))
         project_tree.insert("", "end", values=val, tags=(proj["priority"],))
@@ -178,7 +163,7 @@ def add_member():
         return
     
     member_id = get_next_sequence("member_id")
-    members_col.insert_one({
+    hdb.insert_one("TeamMembers", {
         "member_id": member_id,
         "name": name,
         "role": role
@@ -197,7 +182,8 @@ def update_member():
     name = member_name_var.get()
     role = member_role_var.get()
     
-    members_col.update_one(
+    hdb.update_one(
+        "TeamMembers",
         {"member_id": member_id},
         {"$set": {"name": name, "role": role}}
     )
@@ -213,9 +199,9 @@ def delete_member():
         return
     for sel in selected:
         member_id = int(member_tree.item(sel)['values'][0])
-        members_col.delete_one({"member_id": member_id})
+        hdb.delete_one("TeamMembers", {"member_id": member_id})
         # Set assigned_to to None in Tasks
-        tasks_col.update_many({"assigned_to": member_id}, {"$set": {"assigned_to": None}})
+        hdb.update_many("Tasks", {"assigned_to": member_id}, {"$set": {"assigned_to": None}})
         
     load_members()
     load_tasks()
@@ -229,7 +215,7 @@ def load_members():
     for row in member_tree.get_children():
         member_tree.delete(row)
     
-    members = members_col.find().sort("member_id", 1)
+    members = hdb.find("TeamMembers", sort_by="member_id")
     for mem in members:
         val = (mem["member_id"], mem["name"], mem["role"])
         member_tree.insert("", "end", values=val)
@@ -262,7 +248,7 @@ def add_task():
         return
 
     task_id = get_next_sequence("task_id")
-    tasks_col.insert_one({
+    hdb.insert_one("Tasks", {
         "task_id": task_id,
         "name": name,
         "project_id": project_id,
@@ -297,7 +283,8 @@ def update_task():
         show_message("Invalid Project or Member selection!")
         return
     
-    tasks_col.update_one(
+    hdb.update_one(
+        "Tasks",
         {"task_id": task_id},
         {"$set": {
             "name": name,
@@ -320,7 +307,7 @@ def delete_task():
         return
     for sel in selected:
         task_id = int(task_tree.item(sel)['values'][0])
-        tasks_col.delete_one({"task_id": task_id})
+        hdb.delete_one("Tasks", {"task_id": task_id})
         
     load_tasks()
     update_dashboard()
@@ -337,7 +324,7 @@ def load_tasks():
     for row in task_tree.get_children():
         task_tree.delete(row)
     
-    tasks = tasks_col.find().sort("task_id", 1)
+    tasks = hdb.find("Tasks", sort_by="task_id")
     for task in tasks:
         val = (task["task_id"], task["name"], task["project_id"], task["assigned_to"], task["status"], task["due_date"], task["comments"])
         task_tree.insert("", "end", values=val, tags=(task["status"],))
@@ -352,11 +339,11 @@ def select_task(event):
         values = task_tree.item(selected[0])['values']
         task_name_var.set(values[1])
         # Find project and member strings
-        p = projects_col.find_one({"project_id": int(values[2])})
+        p = hdb.find_one("Projects", {"project_id": int(values[2])})
         task_project_var.set(f"{p['project_id']} - {p['name']}" if p else str(values[2]))
         
         if values[3] and str(values[3]) != "None" and str(values[3]) != "":
-            m = members_col.find_one({"member_id": int(values[3])})
+            m = hdb.find_one("TeamMembers", {"member_id": int(values[3])})
             task_member_var.set(f"{m['member_id']} - {m['name']}" if m else str(values[3]))
         else:
             task_member_var.set("")
@@ -384,7 +371,7 @@ def add_target():
         return
         
     target_id = get_next_sequence("target_id")
-    targets_col.insert_one({
+    hdb.insert_one("Targets", {
         "target_id": target_id,
         "name": name,
         "project_id": project_id,
@@ -415,7 +402,8 @@ def update_target():
         show_message("Invalid Project selection!")
         return
         
-    targets_col.update_one(
+    hdb.update_one(
+        "Targets",
         {"target_id": target_id},
         {"$set": {
             "name": name,
@@ -437,7 +425,7 @@ def delete_target():
         return
     for sel in selected:
         tid = int(target_tree.item(sel)['values'][0])
-        targets_col.delete_one({"target_id": tid})
+        hdb.delete_one("Targets", {"target_id": tid})
         
     load_targets()
     update_dashboard()
@@ -453,7 +441,7 @@ def load_targets():
     for row in target_tree.get_children():
         target_tree.delete(row)
         
-    targets = targets_col.find().sort("target_id", 1)
+    targets = hdb.find("Targets", sort_by="target_id")
     for t in targets:
         val = (t["target_id"], t["name"], t["project_id"], t["due_date"], t["status"], t["description"])
         target_tree.insert("", "end", values=val, tags=(t["status"],))
@@ -466,7 +454,7 @@ def select_target(event):
     if selected:
         values = target_tree.item(selected[0])['values']
         target_name_var.set(values[1])
-        p = projects_col.find_one({"project_id": int(values[2])})
+        p = hdb.find_one("Projects", {"project_id": int(values[2])})
         target_project_var.set(f"{p['project_id']} - {p['name']}" if p else str(values[2]))
         target_due_var.set(values[3] if values[3] and str(values[3]) != "None" else "")
         target_status_var.set(values[4])
@@ -477,12 +465,12 @@ def update_dashboard():
     for widget in dashboard_tab.winfo_children():
         widget.destroy()
         
-    projects = list(projects_col.find().sort("project_id", 1))
+    projects = list(hdb.find("Projects", sort_by="project_id"))
     row=0
     for p in projects:
         pid = p["project_id"]
-        total_tasks = tasks_col.count_documents({"project_id": pid})
-        completed_tasks = tasks_col.count_documents({"project_id": pid, "status": "Completed"})
+        total_tasks = hdb.count_documents("Tasks", {"project_id": pid})
+        completed_tasks = hdb.count_documents("Tasks", {"project_id": pid, "status": "Completed"})
         progress = int((completed_tasks/total_tasks)*100) if total_tasks else 0
 
         # Project Card
@@ -495,11 +483,16 @@ def update_dashboard():
         row+=1
 
 def update_dropdowns():
-    p_list = [f"{p['project_id']} - {p['name']}" for p in projects_col.find().sort("project_id", 1)]
-    m_list = [f"{m['member_id']} - {m['name']}" for m in members_col.find().sort("member_id", 1)]
+    p_list = [f"{p['project_id']} - {p['name']}" for p in hdb.find("Projects", sort_by="project_id")]
+    m_list = [f"{m['member_id']} - {m['name']}" for m in hdb.find("TeamMembers", sort_by="member_id")]
     task_project_dd['values'] = p_list
     task_member_dd['values'] = m_list
     target_project_dd['values'] = p_list
+
+def update_status_bar():
+    status = "🟢 Online (MongoDB Atlas)" if hdb.online else "🔴 Offline (Local SQLite)"
+    status_label.config(text=status, fg="green" if hdb.online else "red")
+    root.after(5000, update_status_bar)
 
 # ---------------- GUI ELEMENTS ----------------
 
@@ -596,8 +589,15 @@ target_tree.pack(fill='both',expand=True,padx=10,pady=10)
 target_tree.bind("<<TreeviewSelect>>",select_target)
 load_targets()
 
+# ---------------- Status Bar ----------------
+status_frame = tk.Frame(root, bg="#f0f4f7")
+status_frame.pack(side='bottom', fill='x', padx=10)
+status_label = tk.Label(status_frame, text="Checking Status...", font=("Helvetica", 10, "italic"), bg="#f0f4f7")
+status_label.pack(side='right')
+
 # ---------------- Initialize ----------------
 update_dropdowns()
 update_dashboard()
+update_status_bar()
 
 root.mainloop()
